@@ -1,0 +1,8 @@
+{
+  "name": "Ghanshyam Billing",
+  "description": "Smart Khata, Billing, GST invoicing, Udhaar ledger with voice AI assistant and multi-language support",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
