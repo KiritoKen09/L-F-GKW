@@ -152,7 +152,7 @@ data class GstRateBreakdown(
 
 data class Invoice(
     val id: String = UUID.randomUUID().toString(),
-    val billNumber: String,
+    val billNumber: String = "",
     val date: Long = System.currentTimeMillis(),
     val customerId: String? = null,
     val customerName: String,

@@ -429,3 +429,17 @@ data class InvoiceSequenceEntity(
     val financialYear: String,
     val lastSequence: Int = 0
 )
+
+@Entity(tableName = "chat_messages")
+data class ChatMessageEntity(
+    @PrimaryKey
+    val id: String = UUID.randomUUID().toString(),
+    val sender: String, // "USER" or "AI"
+    val text: String,
+    val actionType: String? = null,
+    val actionData: String? = null,
+    val actionTitle: String? = null,
+    val reportContent: String? = null,
+    val timestamp: Long = System.currentTimeMillis(),
+    val isApplied: Boolean = false
+)

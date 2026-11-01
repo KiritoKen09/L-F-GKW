@@ -206,3 +206,24 @@ interface InvoiceSequenceDao {
     @Query("DELETE FROM invoice_sequences")
     suspend fun deleteAll()
 }
+
+@Dao
+interface ChatMessageDao {
+    @Query("SELECT * FROM chat_messages ORDER BY timestamp ASC")
+    fun getAllMessages(): Flow<List<ChatMessageEntity>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertMessage(msg: ChatMessageEntity)
+
+    @Update
+    suspend fun updateMessage(msg: ChatMessageEntity)
+
+    @Query("DELETE FROM chat_messages WHERE id NOT IN (SELECT id FROM chat_messages ORDER BY timestamp DESC LIMIT 50)")
+    suspend fun pruneOldMessages()
+
+    @Query("UPDATE chat_messages SET isApplied = 1 WHERE id = :id")
+    suspend fun markApplied(id: String)
+
+    @Query("DELETE FROM chat_messages")
+    suspend fun deleteAll()
+}

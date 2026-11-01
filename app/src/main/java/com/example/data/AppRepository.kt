@@ -14,6 +14,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -69,6 +70,9 @@ class AppRepository(
 
     private val _hasCompletedOnboarding = MutableStateFlow<Boolean>(false)
     val hasCompletedOnboarding: StateFlow<Boolean> = _hasCompletedOnboarding.asStateFlow()
+
+    private val _chatMessages = MutableStateFlow<List<ChatMessageEntity>>(emptyList())
+    val chatMessages: StateFlow<List<ChatMessageEntity>> = _chatMessages.asStateFlow()
 
     init {
         val persistentError = prefs.getString("legacy_migration_error", null)
@@ -131,6 +135,7 @@ class AppRepository(
         }
         _selectedInvoiceTheme.value = settings?.theme ?: "PREMIUM_BLUE"
         _hasCompletedOnboarding.value = settings?.hasCompletedOnboarding ?: false
+        _chatMessages.value = database.chatMessageDao().getAllMessages().firstOrNull() ?: emptyList()
     }
 
     fun refreshAllInMemoryCaches() = runBlocking(Dispatchers.IO) {
@@ -181,6 +186,10 @@ class AppRepository(
                     _hasCompletedOnboarding.value = settings.hasCompletedOnboarding
                 }
             }
+            .launchIn(repositoryScope)
+
+        database.chatMessageDao().getAllMessages()
+            .onEach { _chatMessages.value = it }
             .launchIn(repositoryScope)
     }
 
@@ -609,6 +618,26 @@ class AppRepository(
         return newCustomer.toDomain()
     }
 
+    fun addCustomer(customer: Customer): Customer {
+        checkWritesAllowed()
+        val normalizedPhone = PhoneUtil.normalize(customer.phone)
+        val custId = if (customer.id.isNotBlank()) customer.id else UUID.randomUUID().toString()
+        val newCustomer = CustomerEntity(
+            id = custId,
+            name = customer.name.trim(),
+            phone = normalizedPhone,
+            address = customer.address.trim(),
+            gstin = customer.gstin.trim(),
+            type = customer.type.uppercase(),
+            createdAt = if (customer.createdAt > 0L) customer.createdAt else System.currentTimeMillis()
+        )
+        runBlocking(Dispatchers.IO) {
+            database.customerDao().insert(newCustomer)
+            _customers.value = database.customerDao().getAllList().map { it.toDomain() }
+        }
+        return newCustomer.toDomain()
+    }
+
     fun updateCustomer(
         id: String,
         name: String,
@@ -728,6 +757,27 @@ class AppRepository(
         }
         return newTx.toDomain()
     }
+
+    fun createTransaction(
+        customerId: String,
+        amount: Double,
+        type: String,
+        note: String = "",
+        paymentMode: String = "CASH",
+        linkedToTxId: String? = null,
+        isCompleted: Boolean = false,
+        date: Long = System.currentTimeMillis()
+    ): Transaction = addTransaction(
+        customerId = customerId,
+        amount = amount,
+        type = type,
+        note = note,
+        billNumber = "",
+        paymentMode = paymentMode,
+        linkedToTxId = linkedToTxId,
+        isCompleted = isCompleted,
+        date = date
+    )
 
     fun markBillReceived(
         billId: String,
@@ -1344,6 +1394,12 @@ class AppRepository(
         }
     }
 
+    fun getCashInHand(): Double {
+        val totalIn = cashbook.value.filter { it.type.equals("IN", ignoreCase = true) }.sumOf { it.amount }
+        val totalOut = cashbook.value.filter { it.type.equals("OUT", ignoreCase = true) }.sumOf { it.amount }
+        return totalIn - totalOut
+    }
+
     // ==========================================
     // CSV IMPORT
     // ==========================================
@@ -1437,13 +1493,48 @@ class AppRepository(
                 database.invoiceDao().deleteAll()
                 database.cashbookDao().deleteAll()
                 database.invoiceSequenceDao().deleteAll()
+                database.chatMessageDao().deleteAll()
             }
             _customers.value = emptyList()
             _transactions.value = emptyList()
             _inventory.value = emptyList()
             _invoices.value = emptyList()
             _cashbook.value = emptyList()
+            _chatMessages.value = emptyList()
         }
+    }
+
+    suspend fun saveChatMessage(
+        sender: String,
+        text: String,
+        actionType: String? = null,
+        actionData: String? = null,
+        actionTitle: String? = null,
+        reportContent: String? = null
+    ): com.example.data.local.ChatMessageEntity = withContext(Dispatchers.IO) {
+        val entity = com.example.data.local.ChatMessageEntity(
+            sender = sender,
+            text = text,
+            actionType = actionType,
+            actionData = actionData,
+            actionTitle = actionTitle,
+            reportContent = reportContent,
+            timestamp = System.currentTimeMillis()
+        )
+        database.chatMessageDao().insertMessage(entity)
+        database.chatMessageDao().pruneOldMessages()
+        _chatMessages.value = database.chatMessageDao().getAllMessages().firstOrNull() ?: emptyList()
+        entity
+    }
+
+    suspend fun markChatActionApplied(id: String) = withContext(Dispatchers.IO) {
+        database.chatMessageDao().markApplied(id)
+        _chatMessages.value = database.chatMessageDao().getAllMessages().firstOrNull() ?: emptyList()
+    }
+
+    suspend fun clearChatMessages() = withContext(Dispatchers.IO) {
+        database.chatMessageDao().deleteAll()
+        _chatMessages.value = emptyList()
     }
 
     // ==========================================

@@ -18,9 +18,10 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         CashEntryEntity::class,
         StoreProfileEntity::class,
         AppSettingsEntity::class,
-        InvoiceSequenceEntity::class
+        InvoiceSequenceEntity::class,
+        ChatMessageEntity::class
     ],
-    version = 3,
+    version = 4,
     exportSchema = true
 )
 @TypeConverters(Converters::class)
@@ -34,6 +35,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun storeProfileDao(): StoreProfileDao
     abstract fun appSettingsDao(): AppSettingsDao
     abstract fun invoiceSequenceDao(): InvoiceSequenceDao
+    abstract fun chatMessageDao(): ChatMessageDao
 
     companion object {
         @Volatile
@@ -147,6 +149,25 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("""
+                    CREATE TABLE IF NOT EXISTS chat_messages (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        sender TEXT NOT NULL,
+                        text TEXT NOT NULL,
+                        actionType TEXT DEFAULT NULL,
+                        actionData TEXT DEFAULT NULL,
+                        actionTitle TEXT DEFAULT NULL,
+                        reportContent TEXT DEFAULT NULL,
+                        timestamp INTEGER NOT NULL,
+                        isApplied INTEGER NOT NULL DEFAULT 0
+                    )
+                """.trimIndent())
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_chat_messages_timestamp ON chat_messages(timestamp)")
+            }
+        }
+
         fun getInstance(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -154,7 +175,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "ghanshyam_billing.db"
                 )
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
                 .build()
                 INSTANCE = instance
                 instance

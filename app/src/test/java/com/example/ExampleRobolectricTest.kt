@@ -13,6 +13,8 @@ import com.example.ui.util.PhoneUtil
 import com.example.ui.util.StatementDateRange
 import com.example.ui.util.StatementFilter
 import com.example.ui.util.StatementGenerator
+import com.example.util.AppLockManager
+import com.example.util.SecurityManager
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
 import org.junit.Before
@@ -34,6 +36,10 @@ class ExampleRobolectricTest {
         context = RuntimeEnvironment.getApplication()
         val prefs = context.getSharedPreferences("ghanshyam_billing_prefs", Context.MODE_PRIVATE)
         prefs.edit().clear().commit()
+        val secPrefs = context.getSharedPreferences("app_security_prefs", Context.MODE_PRIVATE)
+        secPrefs.edit().clear().commit()
+        AppLockManager.init(context)
+        AppLockManager.unlock()
         repository = AppRepository(context, asyncInit = false)
         repository.clearAllData()
     }
@@ -664,4 +670,134 @@ class ExampleRobolectricTest {
         val words3 = com.example.ui.util.NumberToWords.convert(0.0)
         assertEquals("Zero Rupees Only", words3)
     }
+
+    @Test
+    fun testSaltedPinHashingAndVerification() {
+        assertFalse("PIN initially not set", SecurityManager.isPinSet(context))
+
+        // Invalid formats rejected
+        assertFalse(SecurityManager.setPin(context, "123")) // 3 digits
+        assertFalse(SecurityManager.setPin(context, "12345")) // 5 digits
+        assertFalse(SecurityManager.setPin(context, "12a4")) // non-digit
+
+        // Valid 4-digit PIN
+        assertTrue(SecurityManager.setPin(context, "1234"))
+        assertTrue(SecurityManager.isPinSet(context))
+
+        // Verification
+        assertTrue("Correct PIN verified", SecurityManager.verifyPin(context, "1234"))
+        assertFalse("Wrong PIN rejected", SecurityManager.verifyPin(context, "0000"))
+        assertFalse("Incomplete PIN rejected", SecurityManager.verifyPin(context, "123"))
+
+        // Security checks: salted hash, not plaintext
+        val secPrefs = context.getSharedPreferences("app_security_prefs", Context.MODE_PRIVATE)
+        val hash = secPrefs.getString("pin_hash", null)
+        assertNotNull(hash)
+        assertNotEquals("Plaintext PIN must NEVER be stored", "1234", hash)
+        val salt = secPrefs.getString("pin_salt", null)
+        assertNotNull("Salt must be stored", salt)
+
+        // Excluded from backup
+        val backupJson = repository.exportDataAsJsonString()
+        assertFalse("Salt must not be in backup", backupJson.contains("pin_salt"))
+        assertFalse("Hash must not be in backup", backupJson.contains("pin_hash"))
+        assertFalse("Plaintext PIN must not be in backup", backupJson.contains("1234"))
+
+        // Removal
+        SecurityManager.removePin(context)
+        assertFalse("PIN successfully removed", SecurityManager.isPinSet(context))
+    }
+
+    @Test
+    fun testAppLockBackgroundTimeout() {
+        SecurityManager.setPin(context, "9876")
+        AppLockManager.init(context)
+        AppLockManager.unlock()
+        assertFalse("App starts unlocked after explicit unlock", AppLockManager.isLocked.value)
+
+        // Backgrounded for 30 seconds (< 60 seconds threshold) -> stays unlocked
+        AppLockManager.simulateBackgroundElapsed(30_000L, context)
+        assertFalse("Should remain unlocked after 30 seconds", AppLockManager.isLocked.value)
+
+        // Backgrounded for 60 seconds (>= 60 seconds threshold) -> locks
+        AppLockManager.simulateBackgroundElapsed(60_000L, context)
+        assertTrue("Should lock after 1 minute in background", AppLockManager.isLocked.value)
+
+        // Unlock
+        AppLockManager.unlock()
+        assertFalse("Unlocked again", AppLockManager.isLocked.value)
+    }
+
+    @Test
+    fun testGeminiFunctionCallingAndOfflineFallback() = runBlocking {
+        val ai = GhanshyamAiEngine(repository, context)
+        val cust = repository.addCustomer("Harish Bhai", "9820044444")
+        repository.addTransaction(cust.id, 6500.0, "GAVE", "Festival delivery")
+
+        // 1. Query: who owes me more than 5000 (deterministic financial accuracy)
+        val queryRes = ai.processQuery("who owes me more than 5000")
+        assertTrue("Query should succeed", queryRes is AiResponse.Success)
+        val reply = (queryRes as AiResponse.Success).replyText
+        assertTrue("Reply lists Harish Bhai", reply.contains("Harish Bhai"))
+        assertTrue("Reply includes exact outstanding amount 6500", reply.contains("6500"))
+
+        // 2. Write action proposal (NEVER execute directly until user taps Apply)
+        val proposalRes = ai.processQuery("Ramesh ko 500 udhar likho")
+        assertTrue("Proposal should succeed", proposalRes is AiResponse.Success)
+        val proposal = proposalRes as AiResponse.Success
+        assertEquals("ADD_TRANSACTION", proposal.actionType)
+        assertNotNull("Proposal card title generated", proposal.actionTitle)
+
+        // Crucial safety check: Transaction NOT added yet in repository
+        assertFalse("Direct write is blocked before confirmation", repository.transactions.value.any { it.amount == 500.0 })
+
+        // User taps "Apply" -> triggers executeAction
+        proposal.executeAction?.invoke()
+        assertTrue("Transaction added after user confirmation", repository.transactions.value.any { it.amount == 500.0 })
+    }
+
+    @Test
+    fun testChatPersistenceInRoom() = runBlocking {
+        repository.clearChatMessages()
+        assertEquals(0, repository.chatMessages.value.size)
+
+        val m1 = repository.saveChatMessage(sender = "USER", text = "Kitna baaki hai?")
+        val m2 = repository.saveChatMessage(
+            sender = "AI",
+            text = "Harish Bhai par 6500 baaki hai.",
+            actionType = "ADD_PARTY",
+            actionTitle = "Add New Party"
+        )
+
+        val msgs = repository.chatMessages.value
+        assertEquals(2, msgs.size)
+        val aiMsg = msgs.find { it.id == m2.id }
+        assertNotNull(aiMsg)
+        assertFalse("Proposal initially unapplied", aiMsg!!.isApplied)
+
+        // Mark applied
+        repository.markChatActionApplied(m2.id)
+        val updatedAiMsg = repository.chatMessages.value.find { it.id == m2.id }
+        assertTrue("Proposal marked as applied", updatedAiMsg!!.isApplied)
+
+        // Test pruning to max 50
+        for (i in 1..55) {
+            repository.saveChatMessage("USER", "Test msg #$i")
+        }
+        assertTrue("Chat history must be capped at 50 messages", repository.chatMessages.value.size <= 50)
+    }
+
+    @Test
+    fun testGeminiApiKeyEncryptedStorage() {
+        SecurityManager.setGeminiApiKey(context, "AIzaSyTestApiKeySample123")
+        val stored = SecurityManager.getGeminiApiKey(context)
+        assertEquals("AIzaSyTestApiKeySample123", stored)
+
+        val jsonBackup = repository.exportDataAsJsonString()
+        assertFalse("API key must not leak into backups", jsonBackup.contains("AIzaSyTestApiKeySample123"))
+
+        SecurityManager.clearGeminiApiKey(context)
+        assertEquals("", SecurityManager.getGeminiApiKey(context))
+    }
 }
+

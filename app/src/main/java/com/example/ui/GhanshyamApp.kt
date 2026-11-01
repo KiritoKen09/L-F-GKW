@@ -31,11 +31,16 @@ import com.example.ui.util.LanguageStrings
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
+import com.example.util.AppLockManager
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun GhanshyamApp(
-    repository: AppRepository
+    repository: AppRepository,
+    initialDailyReportContent: String? = null,
+    openAiOnLaunch: Boolean = false
 ) {
+    val isAppLocked by AppLockManager.isLocked.collectAsState()
     val isInitialLoading by repository.isInitialLoading.collectAsState()
     val isMigrationBlocked by repository.isMigrationBlocked.collectAsState()
     val migrationError by repository.migrationError.collectAsState()
@@ -72,7 +77,16 @@ fun GhanshyamApp(
         return
     }
 
-    var showAiModal by rememberSaveable { mutableStateOf(false) }
+    // App Lock Gate: prompts 4-digit PIN or biometrics if app is locked
+    if (isAppLocked) {
+        LockScreen(
+            currentLang = currentLanguage,
+            onUnlock = { AppLockManager.unlock() }
+        )
+        return
+    }
+
+    var showAiModal by rememberSaveable { mutableStateOf(openAiOnLaunch) }
     var showLanguageMenu by rememberSaveable { mutableStateOf(false) }
     var currentTab by rememberSaveable { mutableStateOf(0) } // 0: Khata, 1: Billing, 2: Stock, 3: Cashbook, 4: Shop
     var selectedCustomerId by rememberSaveable { mutableStateOf<String?>(null) }
@@ -373,6 +387,7 @@ fun GhanshyamApp(
     if (showAiModal) {
         AiAssistantModal(
             repository = repository,
+            initialReportContent = initialDailyReportContent,
             onDismiss = { showAiModal = false }
         )
     }
