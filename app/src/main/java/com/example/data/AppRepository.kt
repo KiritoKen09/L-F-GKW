@@ -760,11 +760,7 @@ class AppRepository(
                 )
                 database.transactionDao().insert(paymentTx)
 
-                // Check if bill is now fully settled
-                val alreadyReceived = database.transactionDao().getByLinkedToTxId(billId).sumOf { it.amount }
-                if (alreadyReceived >= bill.amount - 0.001) {
-                    database.transactionDao().update(bill.copy(isCompleted = true))
-                }
+                // Payment status is derived dynamically via getBillStatus from linked payments
 
                 // Add to Cashbook if requested
                 if (addToCashbook) {
