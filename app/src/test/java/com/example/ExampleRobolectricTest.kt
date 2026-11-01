@@ -445,4 +445,223 @@ class ExampleRobolectricTest {
         assertNotNull("Orphan transaction must exist in repository", orphanTx)
         assertEquals(recoveredCust!!.id, orphanTx!!.customerId)
     }
+
+    @Test
+    fun testConsecutiveSequentialBillNumbering() {
+        val fy = repository.getFinancialYear()
+        val expected1 = "GKW/$fy/0001"
+        val expected2 = "GKW/$fy/0002"
+        val expected3 = "GKW/$fy/0003"
+
+        val item = repository.addInventoryItem(
+            name = "Party Wear Frock",
+            salePrice = 500.0,
+            stock = 50,
+            gstPercent = 5.0
+        )
+
+        // Bill 1
+        val bill1 = repository.createInvoice(
+            Invoice(
+                billNumber = "",
+                customerName = "Customer One",
+                items = listOf(InvoiceItem(name = item.name, quantity = 2, unitPrice = 500.0, gstPercent = 5.0))
+            )
+        )
+        assertEquals("First bill number must be consecutive 0001", expected1, bill1.billNumber)
+
+        // Bill 2
+        val bill2 = repository.createInvoice(
+            Invoice(
+                billNumber = "",
+                customerName = "Customer Two",
+                items = listOf(InvoiceItem(name = item.name, quantity = 1, unitPrice = 500.0, gstPercent = 5.0))
+            )
+        )
+        assertEquals("Second bill number must be consecutive 0002", expected2, bill2.billNumber)
+
+        // Bill 3
+        val bill3 = repository.createInvoice(
+            Invoice(
+                billNumber = "",
+                customerName = "Customer Three",
+                items = listOf(InvoiceItem(name = item.name, quantity = 3, unitPrice = 500.0, gstPercent = 5.0))
+            )
+        )
+        assertEquals("Third bill number must be consecutive 0003", expected3, bill3.billNumber)
+
+        // Verify all 3 bills are in repository with unique consecutive numbers <= 16 characters
+        val allInvoices = repository.invoices.value
+        assertEquals(3, allInvoices.size)
+        assertTrue("Bill number must be <= 16 chars", bill1.billNumber.length <= 16)
+        assertTrue("Bill number must be <= 16 chars", bill2.billNumber.length <= 16)
+        assertTrue("Bill number must be <= 16 chars", bill3.billNumber.length <= 16)
+    }
+
+    @Test
+    fun testGstSplitIntraStateVsInterState() {
+        // Set shop state to Gujarat
+        repository.updateStoreProfile(
+            storeName = "Ghanshyam Kids Wear",
+            address = "Surat Textile Market",
+            phone = "9820011111",
+            upiId = "ghanshyam@upi",
+            gstin = "24AAAAA0000A1Z5",
+            ownerName = "Ghanshyamdas",
+            state = "Gujarat"
+        )
+
+        val item = repository.addInventoryItem(
+            name = "Baby Romper",
+            salePrice = 200.0,
+            stock = 100,
+            gstPercent = 5.0
+        )
+
+        // 1. Intra-State (Same State: Gujarat to Gujarat) -> CGST 2.5% + SGST 2.5%
+        val intraInvoice = repository.createInvoice(
+            Invoice(
+                billNumber = "",
+                customerName = "Ahmedabad Retailer",
+                stateOfSupply = "Gujarat",
+                items = listOf(InvoiceItem(itemId = item.id, name = item.name, quantity = 10, unitPrice = 200.0, gstPercent = 5.0))
+            )
+        )
+        assertFalse("Must be intra-state", intraInvoice.isInterState)
+        assertEquals("Subtotal 2000.0", 2000.0, intraInvoice.subtotal, 0.01)
+        assertEquals("CGST amount 50.0", 50.0, intraInvoice.cgstAmount, 0.01)
+        assertEquals("SGST amount 50.0", 50.0, intraInvoice.sgstAmount, 0.01)
+        assertEquals("IGST amount 0.0", 0.0, intraInvoice.igstAmount, 0.01)
+        assertEquals("Total tax 100.0", 100.0, intraInvoice.gstAmount, 0.01)
+        assertEquals("Total amount 2100.0", 2100.0, intraInvoice.totalAmount, 0.01)
+
+        // 2. Inter-State (Different State: Gujarat to Maharashtra) -> IGST 5.0%
+        val interInvoice = repository.createInvoice(
+            Invoice(
+                billNumber = "",
+                customerName = "Mumbai Wholesaler",
+                stateOfSupply = "Maharashtra",
+                items = listOf(InvoiceItem(itemId = item.id, name = item.name, quantity = 10, unitPrice = 200.0, gstPercent = 5.0))
+            )
+        )
+        assertTrue("Must be inter-state", interInvoice.isInterState)
+        assertEquals("Subtotal 2000.0", 2000.0, interInvoice.subtotal, 0.01)
+        assertEquals("CGST amount 0.0", 0.0, interInvoice.cgstAmount, 0.01)
+        assertEquals("SGST amount 0.0", 0.0, interInvoice.sgstAmount, 0.01)
+        assertEquals("IGST amount 100.0", 100.0, interInvoice.igstAmount, 0.01)
+        assertEquals("Total tax 100.0", 100.0, interInvoice.gstAmount, 0.01)
+        assertEquals("Total amount 2100.0", 2100.0, interInvoice.totalAmount, 0.01)
+    }
+
+    @Test
+    fun testWholesaleSizeStockDeductionAndReversibleCancellation() {
+        val item = repository.addInventoryItem(
+            name = "Boys Cotton Kurta",
+            salePrice = 300.0,
+            sizeStock = mapOf("2-3Y" to 10, "4-5Y" to 15, "6-7Y" to 8),
+            lowStockThreshold = 5,
+            gstPercent = 5.0
+        )
+        assertEquals("Total stock is 33", 33, item.stock)
+        assertEquals(15, item.sizeStock["4-5Y"])
+
+        val party = repository.addCustomer("Surat Garments", "9820033333")
+
+        // Sell 3 pieces of size 4-5Y on CREDIT
+        val invoice = repository.createInvoice(
+            Invoice(
+                billNumber = "",
+                customerId = party.id,
+                customerName = party.name,
+                paymentMode = "CREDIT",
+                items = listOf(
+                    InvoiceItem(
+                        itemId = item.id,
+                        name = item.name,
+                        size = "4-5Y",
+                        quantity = 3,
+                        unitPrice = 300.0,
+                        gstPercent = 5.0
+                    )
+                )
+            )
+        )
+
+        // Verify stock drops specifically for size 4-5Y
+        val updatedItem = repository.inventory.value.find { it.id == item.id }!!
+        assertEquals("Size 4-5Y stock dropped by 3 to 12", 12, updatedItem.sizeStock["4-5Y"])
+        assertEquals("Total stock dropped to 30", 30, updatedItem.stock)
+
+        // Verify credit udhar entry in Khata
+        val customerBalance = repository.getCustomerBalance(party.id)
+        assertTrue("Party has receivable balance", customerBalance > 0)
+        val linkedTx = repository.transactions.value.find { it.billNumber == invoice.billNumber }
+        assertNotNull("Credit transaction created with bill number", linkedTx)
+
+        // CANCEL the invoice with a reason (never delete numbered invoice)
+        repository.cancelInvoice(invoice.id, "Customer returned order")
+
+        val cancelledInvoice = repository.invoices.value.find { it.id == invoice.id }!!
+        assertTrue("Invoice must be marked CANCELLED", cancelledInvoice.isCancelled)
+        assertEquals("Customer returned order", cancelledInvoice.cancelReason)
+        assertEquals("Bill number stays preserved on cancelled bill", invoice.billNumber, cancelledInvoice.billNumber)
+
+        // Verify stock is restored
+        val restoredItem = repository.inventory.value.find { it.id == item.id }!!
+        assertEquals("Size 4-5Y stock restored back to 15", 15, restoredItem.sizeStock["4-5Y"])
+        assertEquals("Total stock restored to 33", 33, restoredItem.stock)
+
+        // Verify credit entry in Khata is reversed
+        val balanceAfterCancel = repository.getCustomerBalance(party.id)
+        assertEquals("Khata balance restored to 0", 0.0, balanceAfterCancel, 0.01)
+    }
+
+    @Test
+    fun testInsufficientSizeStockBlocksInvoice() {
+        val item = repository.addInventoryItem(
+            name = "Silk Sherwani Set",
+            salePrice = 1200.0,
+            sizeStock = mapOf("2-3Y" to 5, "4-5Y" to 3),
+            gstPercent = 12.0
+        )
+
+        try {
+            // Attempt to sell 10 pieces when only 3 available in size 4-5Y
+            repository.createInvoice(
+                Invoice(
+                    billNumber = "",
+                    customerName = "Test Buyer",
+                    items = listOf(
+                        InvoiceItem(
+                            itemId = item.id,
+                            name = item.name,
+                            size = "4-5Y",
+                            quantity = 10,
+                            unitPrice = 1200.0,
+                            gstPercent = 12.0
+                        )
+                    )
+                )
+            )
+            fail("Should have thrown IllegalStateException for insufficient stock")
+        } catch (e: IllegalStateException) {
+            assertTrue("Exception message mentions insufficient stock", e.message?.contains("Insufficient stock") == true)
+        }
+
+        // Verify stock remained untouched
+        val itemAfter = repository.inventory.value.find { it.id == item.id }!!
+        assertEquals("Stock remained 3", 3, itemAfter.sizeStock["4-5Y"])
+    }
+
+    @Test
+    fun testNumberToWordsIndianSystem() {
+        val words1 = com.example.ui.util.NumberToWords.convert(125450.0)
+        assertEquals("One Lakh Twenty-Five Thousand Four Hundred Fifty Rupees Only", words1)
+
+        val words2 = com.example.ui.util.NumberToWords.convert(2500.50)
+        assertEquals("Two Thousand Five Hundred Rupees and Fifty Paise Only", words2)
+
+        val words3 = com.example.ui.util.NumberToWords.convert(0.0)
+        assertEquals("Zero Rupees Only", words3)
+    }
 }

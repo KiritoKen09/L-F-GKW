@@ -142,6 +142,23 @@ object LanguageStrings {
         "btn_whatsapp" to Trans("WhatsApp", "व्हाट्सएप", "વોટ્સએપ", "WhatsApp"),
         "outstanding_amount" to Trans("Baki (Outstanding)", "बकाया", "બાકી", "Outstanding"),
         "received_amount" to Trans("Prapt (Received)", "प्राप्त", "મળેલ", "Received"),
-        "total_bill_amount" to Trans("Total Bill", "कुल बिल", "કુલ બિલ", "Total Bill")
+        "total_bill_amount" to Trans("Total Bill", "कुल बिल", "કુલ બિલ", "Total Bill"),
+        "cancel_invoice_title" to Trans("Bill Cancel Karein", "बिल रद्द करें", "બિલ રદ કરો", "Cancel Invoice"),
+        "cancel_invoice_desc" to Trans("Kya aap is bill ko cancel karna chahte hain? Stock wapas badh jayega aur linked entries reverse ho jayengi.", "क्या आप इस बिल को रद्द करना चाहते हैं? स्टॉक वापस जुड़ जाएगा और प्रविष्टियां पलट जाएंगी।", "શું તમે આ બિલ રદ કરવા માંગો છો? સ્ટોક પાછો ઉમેરાશે અને એન્ટ્રીઓ ઉલટાવી દેવાશે.", "Cancel this invoice? Stock will be restored and linked entries reversed."),
+        "cancel_reason_label" to Trans("Cancel Karne Ka Kaaran", "रद्द करने का कारण", "રદ કરવાનું કારણ", "Cancellation Reason"),
+        "btn_confirm_cancel" to Trans("Cancel Bill", "बिल रद्द करें", "બિલ રદ કરો", "Cancel Bill"),
+        "invoice_cancelled_badge" to Trans("CANCELLED", "रद्द", "રદ કરેલ", "CANCELLED"),
+        "tax_invoice" to Trans("TAX INVOICE", "टैक्स इनवॉइस", "ટેક્સ ઇનવોઇસ", "TAX INVOICE"),
+        "bill_of_supply" to Trans("BILL OF SUPPLY", "बिल ऑफ़ सप्लाई", "બિલ ઓફ સપ્લાય", "BILL OF SUPPLY"),
+        "gst_ca_note" to Trans("Confirm rates with your CA", "अपने सीए से दरों की पुष्टि करें", "તમારા સીએ સાથે દરોની પુષ્ટિ કરો", "Confirm rates with your CA"),
+        "round_off" to Trans("Round off", "राउंड ऑफ", "રાઉન્ડ ઓફ", "Round off"),
+        "amount_in_words" to Trans("Amount in words", "शब्दों में राशि", "શબ્દોમાં રકમ", "Amount in words"),
+        "hsn_code" to Trans("HSN Code", "एचएसएन कोड", "HSN કોડ", "HSN Code"),
+        "size_stock" to Trans("Size Stock", "साइज अनुसार स्टॉक", "સાઇઝ મુજબ સ્ટોક", "Size Stock"),
+        "select_party" to Trans("Party Chunein", "पार्टी चुनें", "પાર્ટી પસંદ કરો", "Select Party"),
+        "out_of_stock_error" to Trans("Stock me uplabdh nahi hai", "स्टॉक में उपलब्ध नहीं है", "સ્ટોકમાં ઉપલબ્ધ નથી", "Insufficient stock"),
+        "low_stock_alert" to Trans("Low Stock", "कम स्टॉक", "ઓછો સ્ટોક", "Low Stock"),
+        "pack_selling" to Trans("Set / Pack", "सेट / पैक", "સેટ / પેક", "Set / Pack"),
+        "item_size" to Trans("Size", "साइज", "સાઇઝ", "Size")
     )
 }

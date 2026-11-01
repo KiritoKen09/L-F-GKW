@@ -119,6 +119,9 @@ interface InvoiceDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertInvoice(invoice: InvoiceEntity)
 
+    @Update
+    suspend fun updateInvoice(invoice: InvoiceEntity)
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertInvoices(invoices: List<InvoiceEntity>)
 
@@ -190,4 +193,16 @@ interface AppSettingsDao {
 
     @Query("DELETE FROM app_settings")
     suspend fun delete()
+}
+
+@Dao
+interface InvoiceSequenceDao {
+    @Query("SELECT lastSequence FROM invoice_sequences WHERE financialYear = :fy LIMIT 1")
+    suspend fun getLastSequence(fy: String): Int?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertOrUpdate(seq: InvoiceSequenceEntity)
+
+    @Query("DELETE FROM invoice_sequences")
+    suspend fun deleteAll()
 }

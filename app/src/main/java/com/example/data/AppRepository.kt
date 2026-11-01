@@ -534,7 +534,8 @@ class AppRepository(
         upiId: String,
         gstin: String,
         ownerName: String,
-        state: String = "Gujarat"
+        state: String = "Gujarat",
+        logoUri: String? = _storeProfile.value.logoUri
     ) {
         checkWritesAllowed()
         val profile = StoreProfileEntity(
@@ -545,7 +546,8 @@ class AppRepository(
             upiId = upiId,
             gstin = gstin,
             ownerName = ownerName,
-            state = state
+            state = state,
+            logoUri = logoUri
         )
         runBlocking(Dispatchers.IO) {
             database.storeProfileDao().insertOrUpdate(profile)
@@ -932,26 +934,70 @@ class AppRepository(
     // INVENTORY OPERATIONS
     // ==========================================
 
+    // ==========================================
+    // BILL NUMBERING (Consecutive Financial Year Series)
+    // ==========================================
+
+    fun getFinancialYear(timestamp: Long = System.currentTimeMillis()): String {
+        val cal = Calendar.getInstance().apply { timeInMillis = timestamp }
+        val year = cal.get(Calendar.YEAR)
+        val month = cal.get(Calendar.MONTH) // 0-indexed: April is Calendar.APRIL (3)
+        val startYear = if (month >= Calendar.APRIL) year else year - 1
+        val startYY = (startYear % 100).toString().padStart(2, '0')
+        val endYY = ((startYear + 1) % 100).toString().padStart(2, '0')
+        return "$startYY-$endYY"
+    }
+
+    fun getNextBillNumberPreview(timestamp: Long = System.currentTimeMillis()): String {
+        val fy = getFinancialYear(timestamp)
+        val lastSeq = runBlocking(Dispatchers.IO) { database.invoiceSequenceDao().getLastSequence(fy) ?: 0 }
+        val nextSeq = lastSeq + 1
+        return "GKW/$fy/${nextSeq.toString().padStart(4, '0')}"
+    }
+
+    // ==========================================
+    // INVENTORY OPERATIONS
+    // ==========================================
+
     fun addInventoryItem(
         name: String,
         itemCode: String = "",
+        hsnCode: String = "",
         salePrice: Double,
         purchasePrice: Double = 0.0,
         stock: Int = 0,
+        sizeStock: Map<String, Int> = emptyMap(),
         category: String = "General",
         sizes: List<String> = emptyList(),
-        gstPercent: Double = 0.0
+        gstPercent: Double = 0.0,
+        lowStockThreshold: Int = 5,
+        packSize: Int = 1,
+        packRatio: Map<String, Int> = emptyMap()
     ): InventoryItem {
         checkWritesAllowed()
+        val resolvedSizeStock = if (sizeStock.isNotEmpty()) {
+            sizeStock
+        } else if (sizes.isNotEmpty()) {
+            val perSize = stock / sizes.size
+            val rem = stock % sizes.size
+            sizes.mapIndexed { idx, s -> s to (perSize + if (idx == 0) rem else 0) }.toMap()
+        } else {
+            mapOf("Free" to stock)
+        }
         val newItem = InventoryItemEntity(
             name = name.trim(),
             itemCode = itemCode.trim(),
+            hsnCode = hsnCode.trim(),
             salePrice = salePrice,
             purchasePrice = purchasePrice,
-            stock = stock,
-            category = category.trim(),
-            sizes = sizes,
-            gstPercent = gstPercent
+            stock = resolvedSizeStock.values.sum(),
+            sizeStock = resolvedSizeStock,
+            category = category.trim().ifBlank { "General" },
+            sizes = resolvedSizeStock.keys.toList(),
+            gstPercent = gstPercent,
+            lowStockThreshold = lowStockThreshold,
+            packSize = packSize,
+            packRatio = packRatio
         )
         runBlocking(Dispatchers.IO) {
             database.inventoryDao().insert(newItem)
@@ -965,8 +1011,36 @@ class AppRepository(
         runBlocking(Dispatchers.IO) {
             val current = database.inventoryDao().getById(itemId)
             if (current != null) {
-                val newStock = (current.stock + stockDelta).coerceAtLeast(0)
-                database.inventoryDao().update(current.copy(stock = newStock))
+                val map = current.sizeStock.toMutableMap()
+                val targetKey = if (map.containsKey("Free")) "Free" else map.keys.firstOrNull() ?: "Free"
+                val curQty = map[targetKey] ?: current.stock
+                map[targetKey] = (curQty + stockDelta).coerceAtLeast(0)
+                val updated = current.copy(
+                    sizeStock = map,
+                    stock = map.values.sum(),
+                    sizes = map.keys.toList()
+                )
+                database.inventoryDao().update(updated)
+                _inventory.value = database.inventoryDao().getAllList().map { it.toDomain() }
+            }
+        }
+    }
+
+    fun updateInventorySizeStock(itemId: String, size: String, delta: Int) {
+        checkWritesAllowed()
+        runBlocking(Dispatchers.IO) {
+            val current = database.inventoryDao().getById(itemId)
+            if (current != null) {
+                val map = current.sizeStock.toMutableMap()
+                val targetKey = if (map.containsKey(size)) size else if (map.containsKey("Free")) "Free" else size
+                val curQty = map[targetKey] ?: 0
+                map[targetKey] = (curQty + delta).coerceAtLeast(0)
+                val updated = current.copy(
+                    sizeStock = map,
+                    stock = map.values.sum(),
+                    sizes = map.keys.toList()
+                )
+                database.inventoryDao().update(updated)
                 _inventory.value = database.inventoryDao().getAllList().map { it.toDomain() }
             }
         }
@@ -986,51 +1060,157 @@ class AppRepository(
 
     fun createInvoice(invoice: Invoice): Invoice {
         checkWritesAllowed()
+        var createdInvoice: Invoice = invoice
         runBlocking(Dispatchers.IO) {
             database.withTransaction {
-                // 1. Insert invoice header and line items
-                database.invoiceDao().insertInvoice(invoice.toEntity())
-                database.invoiceDao().insertItems(invoice.items.map { it.toEntity(invoice.id) })
+                val storeProfile = database.storeProfileDao().getProfileDirect()?.toDomain() ?: StoreProfile()
+                val isInterState = !storeProfile.state.trim().equals(invoice.stateOfSupply.trim(), ignoreCase = true)
 
-                // 2. Reduce stock if items are in inventory
-                val currentInventory = database.inventoryDao().getAllList()
-                invoice.items.forEach { line ->
-                    val matching = currentInventory.find { it.name.equals(line.name, ignoreCase = true) }
+                // 1. Consecutive Bill Number Allocation inside transaction
+                val finalBillNumber = if (invoice.billNumber.isBlank() || invoice.billNumber.startsWith("INV-")) {
+                    val fy = getFinancialYear(invoice.date)
+                    val lastSeq = database.invoiceSequenceDao().getLastSequence(fy) ?: 0
+                    val nextSeq = lastSeq + 1
+                    database.invoiceSequenceDao().insertOrUpdate(InvoiceSequenceEntity(fy, nextSeq))
+                    "GKW/$fy/${nextSeq.toString().padStart(4, '0')}"
+                } else {
+                    // If caller specified a GKW format, track sequence
+                    if (invoice.billNumber.startsWith("GKW/")) {
+                        val parts = invoice.billNumber.split("/")
+                        if (parts.size >= 3) {
+                            val fy = parts[1]
+                            val num = parts[2].toIntOrNull() ?: 0
+                            val currentSeq = database.invoiceSequenceDao().getLastSequence(fy) ?: 0
+                            if (num > currentSeq) {
+                                database.invoiceSequenceDao().insertOrUpdate(InvoiceSequenceEntity(fy, num))
+                            }
+                        }
+                    }
+                    invoice.billNumber
+                }
+
+                // 2. Validate and reduce stock per size
+                val currentInventory = database.inventoryDao().getAllList().associateBy { it.id }.toMutableMap()
+                val updatedItemsList = mutableListOf<InvoiceItem>()
+
+                for (line in invoice.items) {
+                    val matching = if (!line.itemId.isNullOrBlank()) {
+                        currentInventory[line.itemId]
+                    } else {
+                        currentInventory.values.find { it.name.equals(line.name, ignoreCase = true) }
+                    }
+
                     if (matching != null) {
-                        val newStock = (matching.stock - line.quantity).coerceAtLeast(0)
-                        database.inventoryDao().update(matching.copy(stock = newStock))
+                        val sizeStockMap = matching.sizeStock.toMutableMap()
+                        if (line.size == "Pack" && matching.packRatio.isNotEmpty()) {
+                            // Wholesale pack selling
+                            matching.packRatio.forEach { (sz, ratio) ->
+                                val needed = ratio * line.quantity
+                                val available = sizeStockMap[sz] ?: 0
+                                if (available < needed) {
+                                    throw IllegalStateException("Insufficient stock for ${matching.name} size $sz. Available: $available, required: $needed")
+                                }
+                                sizeStockMap[sz] = available - needed
+                            }
+                        } else {
+                            // Specific size or Free size
+                            val targetKey = if (sizeStockMap.containsKey(line.size)) line.size else if (sizeStockMap.containsKey("Free")) "Free" else line.size
+                            val available = sizeStockMap[targetKey] ?: matching.stock
+                            if (available < line.quantity) {
+                                throw IllegalStateException("Insufficient stock for ${matching.name} size ${line.size}. Available: $available, required: ${line.quantity}")
+                            }
+                            sizeStockMap[targetKey] = (available - line.quantity).coerceAtLeast(0)
+                        }
+
+                        val updatedItem = matching.copy(
+                            sizeStock = sizeStockMap,
+                            stock = sizeStockMap.values.sum(),
+                            sizes = sizeStockMap.keys.toList()
+                        )
+                        currentInventory[matching.id] = updatedItem
+                        database.inventoryDao().update(updatedItem)
+
+                        // Attach itemId and HSN code to invoice line
+                        updatedItemsList.add(
+                            line.copy(
+                                itemId = matching.id,
+                                hsnCode = if (line.hsnCode.isNotBlank()) line.hsnCode else matching.hsnCode
+                            ).withGstSplit(isInterState)
+                        )
+                    } else {
+                        updatedItemsList.add(line.withGstSplit(isInterState))
                     }
                 }
 
-                // 3. Payment handling: CASH/UPI posts ONE Cash IN; CREDIT posts to khata
-                if (invoice.paymentMode == "CASH" || invoice.paymentMode == "UPI") {
-                    database.cashbookDao().insert(
-                        CashEntryEntity(
-                            type = "IN",
-                            amount = invoice.totalAmount,
-                            category = "Sales",
-                            remark = "Bill #${invoice.billNumber} (${if (invoice.customerName.isNotBlank()) invoice.customerName else "Cash Customer"})",
-                            paymentMode = invoice.paymentMode,
-                            linkedId = invoice.id,
-                            source = "invoice"
-                        )
-                    )
-                } else if (invoice.paymentMode == "CREDIT" && invoice.customerName.isNotBlank()) {
-                    var customer = database.customerDao().getAllList().find { it.name.equals(invoice.customerName, ignoreCase = true) }
+                // 3. Compute GST totals and round-off
+                val subtotal = updatedItemsList.sumOf { it.taxableAmount }
+                val cgst = updatedItemsList.sumOf { it.cgstAmount }
+                val sgst = updatedItemsList.sumOf { it.sgstAmount }
+                val igst = updatedItemsList.sumOf { it.igstAmount }
+                val totalGst = cgst + sgst + igst
+                val exactTotal = (subtotal + totalGst + invoice.additionalCharges - invoice.discount).coerceAtLeast(0.0)
+                val roundedTotal = Math.round(exactTotal).toDouble()
+                val roundOff = roundedTotal - exactTotal
+
+                // 4. Customer Link / Inline creation
+                var customerId = invoice.customerId
+                if (customerId.isNullOrBlank() && invoice.customerName.isNotBlank() && !invoice.customerName.equals("Cash Customer", ignoreCase = true)) {
+                    var customer = database.customerDao().getAllList().find {
+                        it.name.equals(invoice.customerName, ignoreCase = true) ||
+                        (invoice.customerPhone.isNotBlank() && it.phone == PhoneUtil.normalize(invoice.customerPhone))
+                    }
                     if (customer == null) {
                         customer = CustomerEntity(
                             name = invoice.customerName.trim(),
-                            phone = invoice.customerPhone.trim()
+                            phone = PhoneUtil.normalize(invoice.customerPhone.trim()),
+                            gstin = invoice.customerGstin.ifBlank { invoice.gstin }
                         )
                         database.customerDao().insert(customer)
                     }
+                    customerId = customer.id
+                }
+
+                // 5. Build final invoice entity
+                val finalInv = invoice.copy(
+                    billNumber = finalBillNumber,
+                    customerId = customerId,
+                    items = updatedItemsList,
+                    subtotal = subtotal,
+                    gstAmount = totalGst,
+                    cgstAmount = cgst,
+                    sgstAmount = sgst,
+                    igstAmount = igst,
+                    isInterState = isInterState,
+                    roundOff = roundOff,
+                    totalAmount = roundedTotal,
+                    isCancelled = false
+                )
+                createdInvoice = finalInv
+
+                database.invoiceDao().insertInvoice(finalInv.toEntity())
+                database.invoiceDao().insertItems(updatedItemsList.map { it.toEntity(finalInv.id) })
+
+                // 6. Payment handling: CASH/UPI posts ONE Cash IN; CREDIT posts to khata
+                if (finalInv.paymentMode == "CASH" || finalInv.paymentMode == "UPI") {
+                    database.cashbookDao().insert(
+                        CashEntryEntity(
+                            type = "IN",
+                            amount = finalInv.totalAmount,
+                            category = "Sales",
+                            remark = "Bill #${finalInv.billNumber} (${if (finalInv.customerName.isNotBlank()) finalInv.customerName else "Cash Customer"})",
+                            paymentMode = finalInv.paymentMode,
+                            linkedId = finalInv.id,
+                            source = "invoice"
+                        )
+                    )
+                } else if (finalInv.paymentMode == "CREDIT" && !customerId.isNullOrBlank()) {
                     database.transactionDao().insert(
                         TransactionEntity(
-                            customerId = customer.id,
-                            amount = invoice.totalAmount,
+                            customerId = customerId,
+                            amount = finalInv.totalAmount,
                             type = "GAVE",
-                            note = "Bill #${invoice.billNumber}",
-                            billNumber = invoice.billNumber
+                            note = "Bill #${finalInv.billNumber}",
+                            billNumber = finalInv.billNumber
                         )
                     )
                 }
@@ -1041,48 +1221,89 @@ class AppRepository(
             _transactions.value = database.transactionDao().getAllList().map { it.toDomain() }
             _customers.value = database.customerDao().getAllList().map { it.toDomain() }
         }
-        return invoice
+        return createdInvoice
     }
 
-    fun deleteInvoice(invoiceId: String) {
+    fun cancelInvoice(invoiceId: String, reason: String) {
         checkWritesAllowed()
         runBlocking(Dispatchers.IO) {
             database.withTransaction {
                 val invWithItems = database.invoiceDao().getWithItemsById(invoiceId) ?: return@withTransaction
                 val invoice = invWithItems.invoice
-                val items = invWithItems.items
+                if (invoice.isCancelled) return@withTransaction
 
-                // 1. Restore stock
-                val currentInventory = database.inventoryDao().getAllList()
-                items.forEach { line ->
-                    val matching = currentInventory.find { it.name.equals(line.name, ignoreCase = true) }
+                // 1. Mark invoice as cancelled (keeping its number)
+                val updatedInvoice = invoice.copy(
+                    isCancelled = true,
+                    cancelReason = reason.ifBlank { "Cancelled by user" },
+                    cancelledAt = System.currentTimeMillis()
+                )
+                database.invoiceDao().updateInvoice(updatedInvoice)
+
+                // 2. Restore stock by itemId and size
+                val currentInventory = database.inventoryDao().getAllList().associateBy { it.id }.toMutableMap()
+                invWithItems.items.forEach { line ->
+                    val matching = if (!line.itemId.isNullOrBlank()) {
+                        currentInventory[line.itemId]
+                    } else {
+                        currentInventory.values.find { it.name.equals(line.name, ignoreCase = true) }
+                    }
+
                     if (matching != null) {
-                        database.inventoryDao().update(matching.copy(stock = matching.stock + line.quantity))
+                        val sizeStockMap = matching.sizeStock.toMutableMap()
+                        if (line.size == "Pack" && matching.packRatio.isNotEmpty()) {
+                            matching.packRatio.forEach { (sz, ratio) ->
+                                val cur = sizeStockMap[sz] ?: 0
+                                sizeStockMap[sz] = cur + (ratio * line.quantity)
+                            }
+                        } else {
+                            val targetKey = if (sizeStockMap.containsKey(line.size)) line.size else if (sizeStockMap.containsKey("Free")) "Free" else line.size
+                            val cur = sizeStockMap[targetKey] ?: 0
+                            sizeStockMap[targetKey] = cur + line.quantity
+                        }
+                        val restored = matching.copy(
+                            sizeStock = sizeStockMap,
+                            stock = sizeStockMap.values.sum(),
+                            sizes = sizeStockMap.keys.toList()
+                        )
+                        currentInventory[matching.id] = restored
+                        database.inventoryDao().update(restored)
                     }
                 }
 
-                // 2. Remove linked cashbook entries
+                // 3. Remove linked cashbook entry for bill
                 database.cashbookDao().deleteByLinkedId(invoice.id)
 
-                // 3. Remove linked credit transaction if created
+                // 4. Remove linked credit transaction and any payments linked to it
                 if (invoice.billNumber.isNotBlank()) {
                     val txs = database.transactionDao().getByBillNumber(invoice.billNumber)
                     val txIds = txs.map { it.id }
                     if (txIds.isNotEmpty()) {
+                        // Delete any cashbook entries created for payments on this bill
                         database.cashbookDao().deleteByLinkedIds(txIds)
+                        // Delete payment transactions that paid towards this bill
+                        for (txId in txIds) {
+                            val payments = database.transactionDao().getByLinkedToTxId(txId)
+                            val pIds = payments.map { it.id }
+                            if (pIds.isNotEmpty()) {
+                                database.cashbookDao().deleteByLinkedIds(pIds)
+                            }
+                            database.transactionDao().deleteByLinkedToTxId(txId)
+                        }
                     }
                     database.transactionDao().deleteByBillNumber(invoice.billNumber)
                 }
-
-                // 4. Delete items and invoice
-                database.invoiceDao().deleteItemsByInvoiceId(invoiceId)
-                database.invoiceDao().deleteById(invoiceId)
             }
             _invoices.value = database.invoiceDao().getAllWithItemsList().map { it.toDomain() }
             _inventory.value = database.inventoryDao().getAllList().map { it.toDomain() }
             _cashbook.value = database.cashbookDao().getAllList().map { it.toDomain() }
             _transactions.value = database.transactionDao().getAllList().map { it.toDomain() }
         }
+    }
+
+    fun deleteInvoice(invoiceId: String) {
+        // Delegate to cancelInvoice to satisfy "never delete a numbered invoice" rule
+        cancelInvoice(invoiceId, "Deleted")
     }
 
     // ==========================================
@@ -1215,6 +1436,7 @@ class AppRepository(
                 database.inventoryDao().deleteAll()
                 database.invoiceDao().deleteAll()
                 database.cashbookDao().deleteAll()
+                database.invoiceSequenceDao().deleteAll()
             }
             _customers.value = emptyList()
             _transactions.value = emptyList()

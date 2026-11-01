@@ -103,42 +103,67 @@ data class InventoryItemEntity(
     val id: String = UUID.randomUUID().toString(),
     val name: String,
     val itemCode: String = "",
+    val hsnCode: String = "",
     val salePrice: Double,
-    val purchasePrice: Double,
-    val stock: Int,
+    val purchasePrice: Double = 0.0,
+    val stock: Int = 0,
+    val sizeStock: Map<String, Int> = emptyMap(),
     val category: String = "General",
     val sizes: List<String> = emptyList(),
+    val lowStockThreshold: Int = 5,
+    val packSize: Int = 1,
+    val packRatio: Map<String, Int> = emptyMap(),
     val gstPercent: Double = 0.0
 )
 
-fun InventoryItemEntity.toDomain() = InventoryItem(
-    id = id,
-    name = name,
-    itemCode = itemCode,
-    salePrice = salePrice,
-    purchasePrice = purchasePrice,
-    stock = stock,
-    category = category,
-    sizes = sizes,
-    gstPercent = gstPercent
-)
+fun InventoryItemEntity.toDomain(): InventoryItem {
+    val resolvedSizeStock = if (sizeStock.isNotEmpty()) {
+        sizeStock
+    } else if (sizes.isNotEmpty()) {
+        val perSize = stock / sizes.size
+        val rem = stock % sizes.size
+        sizes.mapIndexed { idx, s -> s to (perSize + if (idx == 0) rem else 0) }.toMap()
+    } else {
+        mapOf("Free" to stock)
+    }
+    return InventoryItem(
+        id = id,
+        name = name,
+        itemCode = itemCode,
+        hsnCode = hsnCode,
+        salePrice = salePrice,
+        purchasePrice = purchasePrice,
+        sizeStock = resolvedSizeStock,
+        category = category,
+        lowStockThreshold = lowStockThreshold,
+        packSize = packSize,
+        packRatio = packRatio,
+        gstPercent = gstPercent
+    )
+}
 
 fun InventoryItem.toEntity() = InventoryItemEntity(
     id = id,
     name = name,
     itemCode = itemCode,
+    hsnCode = hsnCode,
     salePrice = salePrice,
     purchasePrice = purchasePrice,
     stock = stock,
+    sizeStock = sizeStock,
     category = category,
     sizes = sizes,
+    lowStockThreshold = lowStockThreshold,
+    packSize = packSize,
+    packRatio = packRatio,
     gstPercent = gstPercent
 )
 
 @Entity(
     tableName = "invoices",
     indices = [
-        Index(value = ["date"])
+        Index(value = ["date"]),
+        Index(value = ["customerId"])
     ]
 )
 data class InvoiceEntity(
@@ -146,18 +171,27 @@ data class InvoiceEntity(
     val id: String = UUID.randomUUID().toString(),
     val billNumber: String,
     val date: Long = System.currentTimeMillis(),
+    val customerId: String? = null,
     val customerName: String,
     val customerPhone: String = "",
     val subtotal: Double,
     val gstAmount: Double,
+    val cgstAmount: Double = 0.0,
+    val sgstAmount: Double = 0.0,
+    val igstAmount: Double = 0.0,
+    val isInterState: Boolean = false,
     val discount: Double = 0.0,
     val additionalCharges: Double = 0.0,
+    val roundOff: Double = 0.0,
     val totalAmount: Double,
     val paymentMode: String = "CASH",
     val stateOfSupply: String = "Gujarat",
     val gstin: String = "",
     val notes: String = "",
-    val themeName: String = "PREMIUM_BLUE"
+    val themeName: String = "PREMIUM_BLUE",
+    val isCancelled: Boolean = false,
+    val cancelReason: String? = null,
+    val cancelledAt: Long? = null
 )
 
 @Entity(
@@ -178,29 +212,59 @@ data class InvoiceItemEntity(
     @PrimaryKey
     val id: String = UUID.randomUUID().toString(),
     val invoiceId: String,
+    val itemId: String? = null,
     val name: String,
+    val size: String = "Free",
+    val hsnCode: String = "",
     val quantity: Int = 1,
     val unitPrice: Double,
     val gstPercent: Double = 0.0,
+    val cgstRate: Double = 0.0,
+    val sgstRate: Double = 0.0,
+    val igstRate: Double = 0.0,
+    val cgstAmount: Double = 0.0,
+    val sgstAmount: Double = 0.0,
+    val igstAmount: Double = 0.0,
+    val taxableAmount: Double = 0.0,
     val total: Double
 )
 
 fun InvoiceItemEntity.toDomain() = InvoiceItem(
     id = id,
+    itemId = itemId,
     name = name,
+    size = size,
+    hsnCode = hsnCode,
     quantity = quantity,
     unitPrice = unitPrice,
     gstPercent = gstPercent,
+    cgstRate = cgstRate,
+    sgstRate = sgstRate,
+    igstRate = igstRate,
+    cgstAmount = cgstAmount,
+    sgstAmount = sgstAmount,
+    igstAmount = igstAmount,
+    taxableAmount = if (taxableAmount > 0.0) taxableAmount else quantity * unitPrice,
     total = total
 )
 
 fun InvoiceItem.toEntity(invoiceId: String) = InvoiceItemEntity(
     id = id,
     invoiceId = invoiceId,
+    itemId = itemId,
     name = name,
+    size = size,
+    hsnCode = hsnCode,
     quantity = quantity,
     unitPrice = unitPrice,
     gstPercent = gstPercent,
+    cgstRate = cgstRate,
+    sgstRate = sgstRate,
+    igstRate = igstRate,
+    cgstAmount = cgstAmount,
+    sgstAmount = sgstAmount,
+    igstAmount = igstAmount,
+    taxableAmount = taxableAmount,
     total = total
 )
 
@@ -218,37 +282,56 @@ fun InvoiceWithItems.toDomain() = Invoice(
     id = invoice.id,
     billNumber = invoice.billNumber,
     date = invoice.date,
+    customerId = invoice.customerId,
     customerName = invoice.customerName,
     customerPhone = invoice.customerPhone,
+    customerGstin = invoice.gstin,
     items = items.map { it.toDomain() },
     subtotal = invoice.subtotal,
     gstAmount = invoice.gstAmount,
+    cgstAmount = invoice.cgstAmount,
+    sgstAmount = invoice.sgstAmount,
+    igstAmount = invoice.igstAmount,
+    isInterState = invoice.isInterState,
     discount = invoice.discount,
     additionalCharges = invoice.additionalCharges,
+    roundOff = invoice.roundOff,
     totalAmount = invoice.totalAmount,
     paymentMode = invoice.paymentMode,
     stateOfSupply = invoice.stateOfSupply,
     gstin = invoice.gstin,
     notes = invoice.notes,
-    themeName = invoice.themeName
+    themeName = invoice.themeName,
+    isCancelled = invoice.isCancelled,
+    cancelReason = invoice.cancelReason,
+    cancelledAt = invoice.cancelledAt
 )
 
 fun Invoice.toEntity() = InvoiceEntity(
     id = id,
     billNumber = billNumber,
     date = date,
+    customerId = customerId,
     customerName = customerName,
     customerPhone = customerPhone,
     subtotal = subtotal,
     gstAmount = gstAmount,
+    cgstAmount = cgstAmount,
+    sgstAmount = sgstAmount,
+    igstAmount = igstAmount,
+    isInterState = isInterState,
     discount = discount,
     additionalCharges = additionalCharges,
+    roundOff = roundOff,
     totalAmount = totalAmount,
     paymentMode = paymentMode,
     stateOfSupply = stateOfSupply,
-    gstin = gstin,
+    gstin = effectiveCustomerGstin,
     notes = notes,
-    themeName = themeName
+    themeName = themeName,
+    isCancelled = isCancelled,
+    cancelReason = cancelReason,
+    cancelledAt = cancelledAt
 )
 
 @Entity(
@@ -304,7 +387,8 @@ data class StoreProfileEntity(
     val upiId: String = "",
     val gstin: String = "",
     val ownerName: String = "",
-    val state: String = "Gujarat"
+    val state: String = "Gujarat",
+    val logoUri: String? = null
 )
 
 fun StoreProfileEntity.toDomain() = StoreProfile(
@@ -314,7 +398,8 @@ fun StoreProfileEntity.toDomain() = StoreProfile(
     upiId = upiId,
     gstin = gstin,
     ownerName = ownerName,
-    state = state
+    state = state,
+    logoUri = logoUri
 )
 
 fun StoreProfile.toEntity() = StoreProfileEntity(
@@ -325,7 +410,8 @@ fun StoreProfile.toEntity() = StoreProfileEntity(
     upiId = upiId,
     gstin = gstin,
     ownerName = ownerName,
-    state = state
+    state = state,
+    logoUri = logoUri
 )
 
 @Entity(tableName = "app_settings")
@@ -335,4 +421,11 @@ data class AppSettingsEntity(
     val language: String = "hinglish",
     val theme: String = "PREMIUM_BLUE",
     val hasCompletedOnboarding: Boolean = false
+)
+
+@Entity(tableName = "invoice_sequences")
+data class InvoiceSequenceEntity(
+    @PrimaryKey
+    val financialYear: String,
+    val lastSequence: Int = 0
 )

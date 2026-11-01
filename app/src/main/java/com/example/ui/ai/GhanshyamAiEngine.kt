@@ -340,9 +340,8 @@ class GhanshyamAiEngine(
             replyText = "Invoice generate ho gaya hai. Bill Amount: ₹$total. Is bill ko aap customer ke saath share kar sakte hain.",
             actionTitle = "Generate Invoice: ₹$total",
             executeAction = {
-                val billNum = "INV-${System.currentTimeMillis() % 10000}"
                 val invoice = Invoice(
-                    billNumber = billNum,
+                    billNumber = "",
                     customerName = "Walk-in Customer",
                     customerPhone = "",
                     items = listOf(InvoiceItem(name = "General Goods", quantity = 1, unitPrice = total, total = total)),

@@ -63,7 +63,22 @@ fun ShopProfileScreen(
     var gstin by remember(profile) { mutableStateOf(profile.gstin) }
     var ownerName by remember(profile) { mutableStateOf(profile.ownerName) }
     var state by remember(profile) { mutableStateOf(profile.state.ifBlank { "Gujarat" }) }
+    var logoUri by remember(profile) { mutableStateOf(profile.logoUri) }
     var stateExpanded by remember { mutableStateOf(false) }
+
+    val photoPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            try {
+                context.contentResolver.takePersistableUriPermission(
+                    uri,
+                    android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            } catch (_: Exception) {}
+            logoUri = uri.toString()
+        }
+    }
 
     var isSavedSnackbar by remember { mutableStateOf(false) }
     var statusMessage by remember { mutableStateOf<String?>(null) }
@@ -319,11 +334,50 @@ fun ShopProfileScreen(
                     }
                 }
 
+                Spacer(modifier = Modifier.height(10.dp))
+
+                // Optional Shop Logo Picker (Android Photo Picker)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(ChipInactiveBg)
+                        .padding(10.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Invoice Shop Logo (Optional)", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = TextPrimary)
+                        Text(if (!logoUri.isNullOrBlank()) "Custom logo selected for bills" else "No logo selected (Standard header)", style = MaterialTheme.typography.labelSmall, color = TextSecondary)
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        if (!logoUri.isNullOrBlank()) {
+                            IconButton(onClick = { logoUri = null }) {
+                                Icon(Icons.Default.Clear, contentDescription = "Remove logo", tint = UdharRed)
+                            }
+                        }
+                        OutlinedButton(
+                            onClick = {
+                                photoPickerLauncher.launch(
+                                    androidx.activity.result.PickVisualMediaRequest(
+                                        ActivityResultContracts.PickVisualMedia.ImageOnly
+                                    )
+                                )
+                            },
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                        ) {
+                            Icon(Icons.Default.AddPhotoAlternate, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(if (!logoUri.isNullOrBlank()) "Change" else "Choose", fontSize = 12.sp)
+                        }
+                    }
+                }
+
                 Spacer(modifier = Modifier.height(14.dp))
 
                 Button(
                     onClick = {
-                        repository.updateStoreProfile(storeName, address, phone, upiId, gstin, ownerName, state)
+                        repository.updateStoreProfile(storeName, address, phone, upiId, gstin, ownerName, state, logoUri)
                         isSavedSnackbar = true
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = PrimaryBlue),
